@@ -6,6 +6,22 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
+// 
+// FPK is combination of git revision + modified files
+// 
+// When creating for the first time locally modified files need to be recorded as part of the FPK
+// So FPK token is git revision + list of files modified when the FPK was made
+// Files to keep lose are the list of files from the FPK token + all files listed in a dif between the git revision and HEAD
+// 
+//
+// Some git stuff:
+//      Diff different revisions "git --no-pager diff --name-only 777820db8d8490c113df5fc9db8809ff0a7610e6 66965b11a772c636e14a0340f0166010a9c6b6a0"
+//      List recent revisions "git log --pretty=format:%H -n 10"
+//      List locally modified files "git --no-pager diff --name-only HEAD"
+//      Get HEAD revision: "git rev-parse HEAD"
+//      Get untracked files: "git ls-files --others"
+// 
+
 namespace FPKLive
 {
     class Program
@@ -25,14 +41,14 @@ namespace FPKLive
 
         static int Main(string[] args)
         {
-            if(args.Length != 1)
-            {
-                Console.WriteLine("Usage: FPKLive <Mods\\Caveman2Cosmos directory>");
-                return 1;
-            }
+            //if(args.Length != 1)
+            //{
+            //    Console.WriteLine("Usage: FPKLive <Mods\\Caveman2Cosmos directory>");
+            //    return 1;
+            //}
 
-            var modDir = args[0];
-            var gitRootDir = Path.Combine(System.Reflection.Assembly.GetEntryAssembly().Location, "..");
+            //var modDir = args[0];
+            var gitRootDir = Path.GetFullPath(Path.Combine(GetWorkingDir(), ".."));
             var assetsDir = Path.Combine(gitRootDir, "Assets");
             var toolsDir = Path.Combine(gitRootDir, "Tools");
             var unpackedArtDir = Path.Combine(gitRootDir, "UnpackedArt");
@@ -72,21 +88,25 @@ namespace FPKLive
                 File.WriteAllLines(fpkTokenFile, new[] { token.GitRevision }.Concat(token.ModifiedFiles));
             }
 
+            // var currGitRev = ExecuteGitCommand("rev-parse HEAD", unpackedArtDir).FirstOrDefault();
+
             // Now we find the files that changed between the token and current working directory and copy those to the art directory, along with all the biks!
+            var modifiedFiles = ResolveGitPathList(
+                FilterPathList(ExecuteGitCommand($"diff --name-only {token.GitRevision} HEAD", unpackedArtDir), "UnpackedArt")
+                .Concat(token.ModifiedFiles), gitRootDir);
 
+            // Delete existing art patch folder
+            var artPatchFolder = Path.Combine(assetsDir, "art");
+            if (Directory.Exists(artPatchFolder))
+            {
+                Directory.Delete(artPatchFolder, recursive: true);
+            }
 
-            // 
-            // FPK is combination of git revision + modified files
-            // 
-            // When creating for the first time locally modified files need to be recorded as part of the FPK
-            // So FPK token is git revision + list of files modified when the FPK was made
-            // Files to keep lose are the list of files from the FPK token + all files listed in a dif between the git revision and HEAD
-            // 
-
-            // Diff different revisions "git --no-pager diff --name-only 777820db8d8490c113df5fc9db8809ff0a7610e6 66965b11a772c636e14a0340f0166010a9c6b6a0"
-            // List recent revisions "git log --pretty=format:%H -n 10"
-            // List locally modified files "git --no-pager diff --name-only HEAD"
-            // Get HEAD revision: "git rev-parse HEAD"
+            // Copy all modified files and bik files into the Mod art folder
+            foreach(var file in modifiedFiles.Concat(Directory.GetFiles(unpackedArtDir, "*.bik", SearchOption.AllDirectories)))
+            {
+                File.Copy(file, Path.Combine(assetsDir, GetRelativePath(file, unpackedArtDir)));
+            }
             return 0;
         }
 
@@ -115,7 +135,7 @@ namespace FPKLive
         {
             return new FPKToken {
                 GitRevision = ExecuteGitCommand("rev-parse HEAD", rootDir).FirstOrDefault(),
-                ModifiedFiles = ExecuteGitCommand("diff --name-only HEAD", rootDir)
+                ModifiedFiles = FilterPathList(ExecuteGitCommand("diff --name-only HEAD", rootDir), "UnpackedArt").ToArray()
             };
         }
 
@@ -129,9 +149,42 @@ namespace FPKLive
                 WorkingDirectory = workingDirectory,
                 Arguments = args,
                 RedirectStandardOutput = true,
+                UseShellExecute = false
             });
             process.WaitForExit();
-            return process.StandardOutput.ReadToEnd().Split('\n');
+            return process.StandardOutput.ReadToEnd().Split(new []{'\n'}, StringSplitOptions.RemoveEmptyEntries);
         }
+
+        static string GetRelativePath(string filespec, string folder)
+        {
+            Uri pathUri = new Uri(filespec);
+            // Folders must end in a slash
+            if (!folder.EndsWith(Path.DirectorySeparatorChar.ToString()))
+            {
+                folder += Path.DirectorySeparatorChar;
+            }
+            Uri folderUri = new Uri(folder);
+            return Uri.UnescapeDataString(folderUri.MakeRelativeUri(pathUri).ToString().Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        static string CanonicalPath(string path) => path.ToLower().Replace('/', '\\');
+        static IEnumerable<string> ResolveGitPathList(IEnumerable<string> list, string gitRootDir) => list.Select(p => Path.Combine(gitRootDir, p));
+        static IEnumerable<string> FilterPathList(IEnumerable<string> list, string directory) => list.Where(p => CanonicalPath(p).StartsWith(CanonicalPath(directory)));
+
+
+        static string GetWorkingDir()
+        {
+            var location = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
+            if (Path.GetFileName(location).ToLower() != "tools")
+            {
+                if (Path.GetFileName(Environment.CurrentDirectory).ToLower() != "tools")
+                {
+                    throw new Exception("Expected to be directly inside the tools directory, or run with that as the working directory");
+                }
+                return Environment.CurrentDirectory;
+            }
+            return location;
+        }
+
     }
 }
