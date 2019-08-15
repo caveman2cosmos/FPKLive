@@ -1,10 +1,12 @@
-﻿using System;
+﻿using PIEBALD.Dialogs;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 
 // 
 // FPK is combination of git revision + modified files
@@ -34,80 +36,143 @@ namespace FPKLive
             public bool IsValid => GitRevision != null;
         }
 
-        static void Log(string msg)
-        {
-            Console.WriteLine(msg);
-        }
-
+        [STAThread]
         static int Main(string[] args)
         {
-            //if(args.Length != 1)
-            //{
-            //    Console.WriteLine("Usage: FPKLive <Mods\\Caveman2Cosmos directory>");
-            //    return 1;
-            //}
-
-            //var modDir = args[0];
             var gitRootDir = Path.GetFullPath(Path.Combine(GetWorkingDir(), ".."));
             var assetsDir = Path.Combine(gitRootDir, "Assets");
             var toolsDir = Path.Combine(gitRootDir, "Tools");
             var unpackedArtDir = Path.Combine(gitRootDir, "UnpackedArt");
+            var tempFPKDir = Path.Combine(gitRootDir, "FPKTemp");
             var fpkTokenFile = Path.Combine(assetsDir, "fpklive_token.txt");
 
             FPKToken token = ReadTokenFile(fpkTokenFile);
-            if(token == null)
+            if (token == null)
             {
-                // Calculate the FPK token
-                token = CreateToken(unpackedArtDir);
-                if(!token.IsValid)
-                {
-                    Log($"FPK token couldn't be calculated, are you sure you are in a git repository?");
-                }
+                // Instantiate it (this example uses an anonymous method)
+                ProgressDialog dlg = null;
+                dlg = new ProgressDialog(
+                    "Creating FPKs for the first time, this may take a while...",
+                    ProgressBarStyle.Continuous, false,
+                    delegate (object[] Params)
+                    {
+                        // Calculate the FPK token
+                        dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
 
-                // Create the FPKs themselves in temp dir
-                var tempFPKDir = Path.Combine(gitRootDir, "FPKTemp");
-                Directory.CreateDirectory(tempFPKDir);
-                ExecuteCommand("PakBuild", $"/I=\"{unpackedArtDir}\" /O=\"{tempFPKDir}\" /F /S=100 /R=C2C /X=bik", toolsDir);
+                        token = CreateToken(gitRootDir);
+                        if (!token.IsValid)
+                        {
+                            Log($"FPK token couldn't be calculated, are you sure you are in a git repository?");
+                        }
 
-                // Delete old FPKs
-                foreach (var fpk in Directory.GetFiles(assetsDir, "*.fpk"))
-                {
-                    File.Delete(fpk);
-                }
+                        RecreateDirectory(tempFPKDir);
 
-                // Move new FPKs to assets dir
-                foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
-                {
-                    File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
-                }
+                        dlg.RaiseUpdateProgress(50, "FPK Live: Building FPKs...");
 
-                // Cleanup
-                Directory.Delete(tempFPKDir);
+                        ExecuteCommand("PakBuild", $"/I=\"{unpackedArtDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2C", toolsDir);
 
-                // Save token (could do this as json or something but this is fine for now)
-                File.WriteAllLines(fpkTokenFile, new[] { token.GitRevision }.Concat(token.ModifiedFiles));
+                        dlg.RaiseUpdateProgress(70, "FPK Live: Deleting old FPKs...");
+
+                        // Delete old FPKs
+                        foreach (var fpk in Directory.GetFiles(assetsDir, "*.fpk"))
+                        {
+                            File.Delete(fpk);
+                        }
+
+                        dlg.RaiseUpdateProgress(80, "FPK Live: Moving new FPKs into place...");
+
+                        // Move new FPKs to assets dir
+                        foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
+                        {
+                            File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
+                        }
+
+                        dlg.RaiseUpdateProgress(90, "FPK Live: Cleaning up...");
+
+                        // Cleanup
+                        Directory.Delete(tempFPKDir, recursive: true);
+
+                        // Save token (could do this as json or something but this is fine for now)
+                        File.WriteAllLines(fpkTokenFile, new[] { token.GitRevision }.Concat(token.ModifiedFiles));
+
+                        dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
+
+                        return null;
+                    }
+                );
+
+                // Then all you need to do is 
+                dlg.ShowDialog();
+            }
+
+            // Delete old Patch FPKs
+            foreach (var fpk in Directory.GetFiles(assetsDir, "C2CPatch*.fpk"))
+            {
+                File.Delete(fpk);
             }
 
             // var currGitRev = ExecuteGitCommand("rev-parse HEAD", unpackedArtDir).FirstOrDefault();
-
             // Now we find the files that changed between the token and current working directory and copy those to the art directory, along with all the biks!
             var modifiedFiles = ResolveGitPathList(
-                FilterPathList(ExecuteGitCommand($"diff --name-only {token.GitRevision} HEAD", unpackedArtDir), "UnpackedArt")
-                .Concat(token.ModifiedFiles), gitRootDir);
+                GetChangedArtFilesRev(gitRootDir, $"{token.GitRevision} HEAD")
+                .Concat(token.ModifiedFiles).Select(p => $"UnpackedArt/{p}")
+                .Distinct(), 
+                gitRootDir).ToList();
 
-            // Delete existing art patch folder
-            var artPatchFolder = Path.Combine(assetsDir, "art");
-            if (Directory.Exists(artPatchFolder))
+            if (modifiedFiles.Count > 0)
             {
-                Directory.Delete(artPatchFolder, recursive: true);
+                // Instantiate it (this example uses an anonymous method)
+                ProgressDialog dlg = null;
+                dlg = new ProgressDialog(
+                    "Patching FPKs...",
+                    ProgressBarStyle.Continuous, false,
+                    delegate (object[] Params)
+                    {
+                        // Make sure the temp dir is clean and exists
+                        RecreateDirectory(tempFPKDir);
+                        dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
+
+                        // Copy all modified files into temporary patch art folder
+                        foreach (var file in modifiedFiles.Where(f => File.Exists(f)))
+                        {
+                            CopyFileRobust(file, Path.Combine(tempFPKDir, GetRelativePath(file, unpackedArtDir)));
+                        }
+
+                        // Build patch FPK file
+                        dlg.RaiseUpdateProgress(50, "FPK Live: Building Patch FPK...");
+                        ExecuteCommand("PakBuild", $"/I=\"{tempFPKDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2CPatch", toolsDir);
+
+                        dlg.RaiseUpdateProgress(80, "FPK Live: Cleaning up ...");
+                        // Move new FPK patch files to assets dir
+                        foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
+                        {
+                            File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
+                        }
+
+                        // Cleanup
+                        Directory.Delete(tempFPKDir, recursive: true);
+
+                        dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
+
+                        return null;
+                    }
+                );
+
+                // Then all you need to do is 
+                dlg.ShowDialog();
             }
 
-            // Copy all modified files and bik files into the Mod art folder
-            foreach(var file in modifiedFiles.Concat(Directory.GetFiles(unpackedArtDir, "*.bik", SearchOption.AllDirectories)))
-            {
-                File.Copy(file, Path.Combine(assetsDir, GetRelativePath(file, unpackedArtDir)));
-            }
             return 0;
+        }
+
+        private static void CopyFileRobust(string file, string targetFile)
+        {
+            var targetDir = Path.GetDirectoryName(targetFile);
+            if (!Directory.Exists(targetDir))
+            {
+                Directory.CreateDirectory(targetDir);
+            }
+            File.Copy(file, targetFile);
         }
 
         static FPKToken ReadTokenFile(string fpkTokenFile)
@@ -131,12 +196,15 @@ namespace FPKLive
             return null;
         }
 
-        static FPKToken CreateToken(string rootDir)
+        static FPKToken CreateToken(string rootDir) => new FPKToken { GitRevision = ExecuteGitCommand("rev-parse HEAD", rootDir).FirstOrDefault(), ModifiedFiles = GetChangedArtFiles(rootDir) };
+
+        private static string[] GetChangedArtFiles(string rootDir) => GetChangedArtFilesRev(rootDir, "HEAD");
+
+        private static string[] GetChangedArtFilesRev(string rootDir, string rev)
         {
-            return new FPKToken {
-                GitRevision = ExecuteGitCommand("rev-parse HEAD", rootDir).FirstOrDefault(),
-                ModifiedFiles = FilterPathList(ExecuteGitCommand("diff --name-only HEAD", rootDir), "UnpackedArt").ToArray()
-            };
+            var changedFiles = ExecuteGitCommand($"diff --name-only {rev} -- UnpackedArt/", rootDir);
+            var newFiles = ExecuteGitCommand("ls-files --others -- UnpackedArt/", rootDir);
+            return changedFiles.Concat(newFiles).Select(p => p.Replace("UnpackedArt/", "")).ToArray();
         }
 
         static string[] ExecuteGitCommand(string command, string workingDirectory) => ExecuteCommand("git", "--no-pager " + command, workingDirectory);
@@ -151,8 +219,9 @@ namespace FPKLive
                 RedirectStandardOutput = true,
                 UseShellExecute = false
             });
+            var results = process.StandardOutput.ReadToEnd().Split(new []{'\n'}, StringSplitOptions.RemoveEmptyEntries);
             process.WaitForExit();
-            return process.StandardOutput.ReadToEnd().Split(new []{'\n'}, StringSplitOptions.RemoveEmptyEntries);
+            return results;
         }
 
         static string GetRelativePath(string filespec, string folder)
@@ -171,6 +240,19 @@ namespace FPKLive
         static IEnumerable<string> ResolveGitPathList(IEnumerable<string> list, string gitRootDir) => list.Select(p => Path.Combine(gitRootDir, p));
         static IEnumerable<string> FilterPathList(IEnumerable<string> list, string directory) => list.Where(p => CanonicalPath(p).StartsWith(CanonicalPath(directory)));
 
+        static void Log(string msg)
+        {
+            Console.WriteLine(msg);
+        }
+
+        static void RecreateDirectory(string dir)
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+            Directory.CreateDirectory(dir);
+        }
 
         static string GetWorkingDir()
         {
