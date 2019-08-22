@@ -39,129 +39,135 @@ namespace FPKLive
         [STAThread]
         static int Main(string[] args)
         {
-            var gitRootDir = Path.GetFullPath(Path.Combine(GetWorkingDir(), ".."));
-            var assetsDir = Path.Combine(gitRootDir, "Assets");
-            var toolsDir = Path.Combine(gitRootDir, "Tools");
-            var unpackedArtDir = Path.Combine(gitRootDir, "UnpackedArt");
-            var tempFPKDir = Path.Combine(gitRootDir, "FPKTemp");
-            var fpkTokenFile = Path.Combine(assetsDir, "fpklive_token.txt");
-
-            FPKToken token = ReadTokenFile(fpkTokenFile);
-            if (token == null)
+            try
             {
-                // Instantiate it (this example uses an anonymous method)
-                ProgressDialog dlg = null;
-                dlg = new ProgressDialog(
-                    "Creating FPKs for the first time, this may take a while...",
-                    ProgressBarStyle.Continuous, false,
-                    delegate (object[] Params)
-                    {
-                        // Calculate the FPK token
-                        dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
+                var gitRootDir = Path.GetFullPath(Path.Combine(GetWorkingDir(), ".."));
+                var assetsDir = Path.Combine(gitRootDir, "Assets");
+                var toolsDir = Path.Combine(gitRootDir, "Tools");
+                var unpackedArtDir = Path.Combine(gitRootDir, "UnpackedArt");
+                var tempFPKDir = Path.Combine(gitRootDir, "FPKTemp");
+                var fpkTokenFile = Path.Combine(assetsDir, "fpklive_token.txt");
 
-                        token = CreateToken(gitRootDir);
-                        if (!token.IsValid)
+                FPKToken token = ReadTokenFile(fpkTokenFile);
+                if (token == null)
+                {
+                    // Instantiate it (this example uses an anonymous method)
+                    ProgressDialog dlg = null;
+                    dlg = new ProgressDialog(
+                        "Creating FPKs for the first time, this may take a while...",
+                        ProgressBarStyle.Continuous, false,
+                        delegate (object[] Params)
                         {
-                            Log($"FPK token couldn't be calculated, are you sure you are in a git repository?");
+                            // Calculate the FPK token
+                            dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
+
+                            token = CreateToken(gitRootDir);
+                            if (!token.IsValid)
+                            {
+                                Log($"FPK token couldn't be calculated, are you sure you are in a git repository?");
+                            }
+
+                            RecreateDirectory(tempFPKDir);
+
+                            dlg.RaiseUpdateProgress(50, "FPK Live: Building FPKs...");
+
+                            ExecuteCommand("PakBuild", $"/I=\"{unpackedArtDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2C", toolsDir);
+
+                            dlg.RaiseUpdateProgress(70, "FPK Live: Deleting old FPKs...");
+
+                            // Delete old FPKs
+                            foreach (var fpk in Directory.GetFiles(assetsDir, "*.fpk"))
+                            {
+                                File.Delete(fpk);
+                            }
+
+                            dlg.RaiseUpdateProgress(80, "FPK Live: Moving new FPKs into place...");
+
+                            // Move new FPKs to assets dir
+                            foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
+                            {
+                                File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
+                            }
+
+                            dlg.RaiseUpdateProgress(90, "FPK Live: Cleaning up...");
+
+                            // Cleanup
+                            Directory.Delete(tempFPKDir, recursive: true);
+
+                            // Save token (could do this as json or something but this is fine for now)
+                            File.WriteAllLines(fpkTokenFile, new[] { token.GitRevision }.Concat(token.ModifiedFiles));
+
+                            dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
+
+                            return null;
                         }
+                    );
 
-                        RecreateDirectory(tempFPKDir);
+                    // Then all you need to do is 
+                    dlg.ShowDialog();
+                }
 
-                        dlg.RaiseUpdateProgress(50, "FPK Live: Building FPKs...");
+                // Delete old Patch FPKs
+                foreach (var fpk in Directory.GetFiles(assetsDir, "C2CPatch*.fpk"))
+                {
+                    File.Delete(fpk);
+                }
 
-                        ExecuteCommand("PakBuild", $"/I=\"{unpackedArtDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2C", toolsDir);
+                // var currGitRev = ExecuteGitCommand("rev-parse HEAD", unpackedArtDir).FirstOrDefault();
+                // Now we find the files that changed between the token and current working directory and copy those to the art directory, along with all the biks!
+                var modifiedFiles = ResolveGitPathList(
+                    GetChangedArtFilesRev(gitRootDir, $"{token.GitRevision} HEAD")
+                    .Concat(token.ModifiedFiles).Select(p => $"UnpackedArt/{p}")
+                    .Distinct(),
+                    gitRootDir).ToList();
 
-                        dlg.RaiseUpdateProgress(70, "FPK Live: Deleting old FPKs...");
-
-                        // Delete old FPKs
-                        foreach (var fpk in Directory.GetFiles(assetsDir, "*.fpk"))
+                if (modifiedFiles.Count > 0)
+                {
+                    // Instantiate it (this example uses an anonymous method)
+                    ProgressDialog dlg = null;
+                    dlg = new ProgressDialog(
+                        "Patching FPKs...",
+                        ProgressBarStyle.Continuous, false,
+                        delegate (object[] Params)
                         {
-                            File.Delete(fpk);
+                            // Make sure the temp dir is clean and exists
+                            RecreateDirectory(tempFPKDir);
+                            dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
+
+                            // Copy all modified files into temporary patch art folder
+                            foreach (var file in modifiedFiles.Where(f => File.Exists(f)))
+                            {
+                                CopyFileRobust(file, Path.Combine(tempFPKDir, GetRelativePath(file, unpackedArtDir)));
+                            }
+
+                            // Build patch FPK file
+                            dlg.RaiseUpdateProgress(50, "FPK Live: Building Patch FPK...");
+                            ExecuteCommand("PakBuild", $"/I=\"{tempFPKDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2CPatch", toolsDir);
+
+                            dlg.RaiseUpdateProgress(80, "FPK Live: Cleaning up ...");
+                            // Move new FPK patch files to assets dir
+                            foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
+                            {
+                                File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
+                            }
+
+                            // Cleanup
+                            Directory.Delete(tempFPKDir, recursive: true);
+
+                            dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
+
+                            return null;
                         }
+                    );
 
-                        dlg.RaiseUpdateProgress(80, "FPK Live: Moving new FPKs into place...");
-
-                        // Move new FPKs to assets dir
-                        foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
-                        {
-                            File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
-                        }
-
-                        dlg.RaiseUpdateProgress(90, "FPK Live: Cleaning up...");
-
-                        // Cleanup
-                        Directory.Delete(tempFPKDir, recursive: true);
-
-                        // Save token (could do this as json or something but this is fine for now)
-                        File.WriteAllLines(fpkTokenFile, new[] { token.GitRevision }.Concat(token.ModifiedFiles));
-
-                        dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
-
-                        return null;
-                    }
-                );
-
-                // Then all you need to do is 
-                dlg.ShowDialog();
+                    // Then all you need to do is 
+                    dlg.ShowDialog();
+                }
             }
-
-            // Delete old Patch FPKs
-            foreach (var fpk in Directory.GetFiles(assetsDir, "C2CPatch*.fpk"))
+            catch(Exception ex)
             {
-                File.Delete(fpk);
+                MessageBox.Show($"An exception occurred:\n{ex.Message}\n\nPlease report this with a screenshot of this dialog on the forums (@billw2015) or on discord (@billw)!\n\nFull exception details:\n{ex}", "FPK Live: Exception occurred!");
             }
-
-            // var currGitRev = ExecuteGitCommand("rev-parse HEAD", unpackedArtDir).FirstOrDefault();
-            // Now we find the files that changed between the token and current working directory and copy those to the art directory, along with all the biks!
-            var modifiedFiles = ResolveGitPathList(
-                GetChangedArtFilesRev(gitRootDir, $"{token.GitRevision} HEAD")
-                .Concat(token.ModifiedFiles).Select(p => $"UnpackedArt/{p}")
-                .Distinct(), 
-                gitRootDir).ToList();
-
-            if (modifiedFiles.Count > 0)
-            {
-                // Instantiate it (this example uses an anonymous method)
-                ProgressDialog dlg = null;
-                dlg = new ProgressDialog(
-                    "Patching FPKs...",
-                    ProgressBarStyle.Continuous, false,
-                    delegate (object[] Params)
-                    {
-                        // Make sure the temp dir is clean and exists
-                        RecreateDirectory(tempFPKDir);
-                        dlg.RaiseUpdateProgress(10, "FPK Live: Gathering files...");
-
-                        // Copy all modified files into temporary patch art folder
-                        foreach (var file in modifiedFiles.Where(f => File.Exists(f)))
-                        {
-                            CopyFileRobust(file, Path.Combine(tempFPKDir, GetRelativePath(file, unpackedArtDir)));
-                        }
-
-                        // Build patch FPK file
-                        dlg.RaiseUpdateProgress(50, "FPK Live: Building Patch FPK...");
-                        ExecuteCommand("PakBuild", $"/I=\"{tempFPKDir}\" /O=\"{tempFPKDir}\" /F /S=256 /R=C2CPatch", toolsDir);
-
-                        dlg.RaiseUpdateProgress(80, "FPK Live: Cleaning up ...");
-                        // Move new FPK patch files to assets dir
-                        foreach (var fpk in Directory.GetFiles(tempFPKDir, "*.fpk"))
-                        {
-                            File.Move(fpk, Path.Combine(assetsDir, Path.GetFileName(fpk)));
-                        }
-
-                        // Cleanup
-                        Directory.Delete(tempFPKDir, recursive: true);
-
-                        dlg.RaiseUpdateProgress(100, "FPK Live: Done!");
-
-                        return null;
-                    }
-                );
-
-                // Then all you need to do is 
-                dlg.ShowDialog();
-            }
-
             return 0;
         }
 
