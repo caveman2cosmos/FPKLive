@@ -116,7 +116,7 @@ namespace FPKLive
                 // var currGitRev = ExecuteGitCommand("rev-parse HEAD", unpackedArtDir).FirstOrDefault();
                 // Now we find the files that changed between the token and current working directory and copy those to the art directory, along with all the biks!
                 var modifiedFiles = ResolveGitPathList(
-                    GetChangedArtFilesRev(gitRootDir, $"{token.GitRevision} HEAD")
+                    GetChangedArtFilesRev(gitRootDir, $"{token.GitRevision}")
                     .Concat(token.ModifiedFiles).Select(p => $"UnpackedArt/{p}")
                     .Distinct(),
                     gitRootDir).ToList();
